@@ -877,6 +877,10 @@ export namespace noteoverview {
       overviewSettings["datetime"]
     );
 
+    settings.split = overviewSettings["split"]
+      ? overviewSettings["split"]
+      : null;
+
     return settings;
   }
 
@@ -912,6 +916,99 @@ export namespace noteoverview {
     return additionalFields;
   }
 
+  export async function getQueries(
+    query: string,
+    overviewSettings: any
+  ): Promise<Record<string, string>> {
+    let queries: Record<string, string> = { "0": query };
+    const options = await noteoverview.getOptions(overviewSettings);
+
+    if (options.split) {
+      let fieldsValues: string[] = [];
+      let _queries: Record<string, string> = {};
+
+      let pageNum = 1;
+      do {
+        try {
+          var queryNotes = await joplin.data.get(["search"], {
+            query: query,
+            fields: "id, parent_id",
+            limit: 50,
+            page: pageNum++,
+          });
+        } catch (e) {
+          logging.error(e.message);
+        }
+        for (let note of queryNotes.items) {
+          fieldsValues.push(
+            await noteoverview.getFieldValue(options.split.by, note, options)
+          );
+        }
+      } while (queryNotes.has_more);
+
+      fieldsValues = [...new Set(fieldsValues)].filter(
+        (value: string) => !!value.trim()
+      );
+
+      if (options.split.by == "breadcrumb") {
+        for (let idx in fieldsValues) {
+          fieldsValues[idx] = fieldsValues[idx].split(" > ").slice(-1)[0];
+        }
+      }
+
+      let allQueries = [];
+      if (options.split.by == "tags") {
+        for (let value of fieldsValues) {
+          allQueries.push(...value.split(", "));
+        }
+        allQueries = [...new Set(allQueries)];
+      }
+
+      for (let idx in fieldsValues) {
+        let queryOperator = options.split.by;
+
+        switch (options.split.by) {
+          case "breadcrumb":
+            queryOperator = "notebook";
+            break;
+          case "tags":
+            queryOperator = "tag";
+            break;
+        }
+
+        const sanitizedOldQuery = query
+          .split(" ")
+          .filter(
+            (value: string) =>
+              !value.toLowerCase().includes(`${queryOperator}:`)
+          );
+        let newQuery: string[] = [...sanitizedOldQuery];
+
+        if (options.split.by == "tags") {
+          // calculate difference
+          const includedTagsName = fieldsValues[idx].split(", ");
+          for (let value of includedTagsName) {
+            newQuery.push(`${queryOperator}:${value}`);
+          }
+
+          const excludedTagsName = allQueries.filter(
+            (value) => !includedTagsName.includes(value)
+          );
+          for (let value of excludedTagsName) {
+            newQuery.push(`-${queryOperator}:${value}`);
+          }
+        } else {
+          newQuery.push(`${queryOperator}:${fieldsValues[idx]}`);
+        }
+        _queries[fieldsValues[idx]] = newQuery.join(" ");
+      }
+
+      queries = _queries;
+    }
+
+    return queries;
+  }
+
   export async function getOverviewContent(
     noteId: string,
     noteTitle: string,
@@ -921,141 +1018,37 @@ export namespace noteoverview {
     const query: string = overviewSettings["search"];
     let overviewContent: string[] = [];
 
-    if (query) {
-      const options = await noteoverview.getOptions(overviewSettings);
+    const options = await noteoverview.getOptions(overviewSettings);
 
-      // create array from fields
-      let fields = [];
-      if (options.fields) {
-        fields = options.fields.toLowerCase().replace(/\s/g, "").split(",");
-      } else {
-        fields = ["updated_time", "title"];
-      }
+    let queries: Record<string, string> = await noteoverview.getQueries(
+      query,
+      overviewSettings
+    );
 
-      // Field alias for header
-      const headerFields = await noteoverview.getHeaderFields(options.alias, [
-        ...fields,
-      ]);
-
-      // Remove virtual fields from dbFieldsArray
-      let dbFieldsArray = [...fields];
-      dbFieldsArray = dbFieldsArray.filter(
-        (el) =>
-          [
-            "notebook",
-            "breadcrumb",
-            "tags",
-            "size",
-            "file",
-            "file_size",
-            "status",
-            "image",
-            "excerpt",
-            "link",
-          ].indexOf(el) === -1
+    let contentBlocks: string[][] = [];
+    for (let idx in queries) {
+      let contentBlock = await noteoverview.getOverviewContentBlock(
+        queries[idx],
+        noteId,
+        noteTitle,
+        overviewSettings
       );
 
-      dbFieldsArray = [
-        ...dbFieldsArray,
-        ...(await noteoverview.getAdditionalFields(fields)),
-      ];
+      if (options.split) {
+        contentBlock.push("");
 
-      let noteCount = 0;
-      let queryLimit = 50;
-      let noteLimit = overviewSettings["limit"]
-        ? overviewSettings["limit"]
-        : -1;
+        if (options.split.prefix) {
+          const splitPrefix = options.split.prefix.replace("{{title}}", idx);
 
-      if (noteLimit != -1) {
-        logging.verbose("Note limit: " + noteLimit);
-        if (overviewSettings.limit < queryLimit) {
-          queryLimit = overviewSettings.limit;
-          logging.verbose("Query limit: " + queryLimit);
+          contentBlock.unshift(splitPrefix);
         }
+        if (options.split.suffix) contentBlock.push(options.split.suffix);
       }
 
-      let queryNotes = null;
-      let pageQueryNotes = 1;
-      const entrys: string[] = [];
-      do {
-        try {
-          queryNotes = await joplin.data.get(["search"], {
-            query: query,
-            fields: "id, parent_id, " + dbFieldsArray.join(","),
-            order_by: options.orderBy,
-            order_dir: options.orderDir.toUpperCase(),
-            limit: queryLimit,
-            page: pageQueryNotes++,
-          });
-        } catch (error) {
-          logging.error(error.message);
-          let errorMsg = error.message;
-          errorMsg = errorMsg.replace(/(.*)(:\sSELECT.*)/g, "$1");
-
-          await noteoverview.showError(noteTitle, errorMsg, "");
-          let settingsOnly: string[] = [];
-          settingsOnly.unshift(
-            await noteoverview.createSettingsBlock(overviewSettings)
-          );
-          return settingsOnly;
-        }
-
-        for (let queryNotesKey in queryNotes.items) {
-          if (noteLimit != -1 && noteCount >= noteLimit) {
-            break;
-          }
-          if (queryNotes.items[queryNotesKey].id != noteId) {
-            noteCount++;
-
-            if (options.listview) {
-              entrys.push(
-                await noteoverview.getNoteInfoAsListView(
-                  queryNotes.items[queryNotesKey],
-                  options
-                )
-              );
-            } else {
-              entrys.push(
-                await noteoverview.getNoteInfoAsTable(
-                  fields,
-                  queryNotes.items[queryNotesKey],
-                  options
-                )
-              );
-            }
-          }
-        }
-      } while (
-        queryNotes.has_more &&
-        (noteCount <= noteLimit || noteLimit == -1)
-      );
-
-      if (options.listview) {
-        if (options.listview.separator) {
-          for (let index = 0; index < entrys.length - 1; index++) {
-            entrys[index] += options.listview.separator;
-          }
-        }
-
-        if (options.listview.prefix) entrys.unshift(options.listview.prefix);
-        if (options.listview.suffix) entrys.push(options.listview.suffix);
-
-        if (options.listview.linebreak === false) {
-          overviewContent.push(entrys.join(""));
-        } else {
-          overviewContent = entrys;
-        }
-      } else {
-        overviewContent = [
-          ...(await noteoverview.getTableHeader(headerFields)),
-          ...entrys,
-        ];
-      }
-
-      await addNoteCount(overviewContent, noteCount, options);
-
-      await addHTMLDetailsTag(overviewContent, noteCount, options);
+      contentBlocks.push(contentBlock);
     }
+
+    overviewContent = contentBlocks.flat();
 
     overviewContent.unshift(
       await noteoverview.createSettingsBlock(overviewSettings)
@@ -1063,6 +1056,148 @@ export namespace noteoverview {
     overviewContent.push("<!--endoverview-->");
 
     return overviewContent;
+  }
+
+  export async function getOverviewContentBlock(
+    query: string,
+    noteId: string,
+    noteTitle: string,
+    overviewSettings: any
+  ): Promise<string[]> {
+    const options = await noteoverview.getOptions(overviewSettings);
+
+    // create array from fields
+    let fields = [];
+    if (options.fields) {
+      fields = options.fields.toLowerCase().replace(/\s/g, "").split(",");
+    } else {
+      fields = ["updated_time", "title"];
+    }
+
+    // Field alias for header
+    const headerFields = await noteoverview.getHeaderFields(options.alias, [
+      ...fields,
+    ]);
+
+    // Remove virtual fields from dbFieldsArray
+    let dbFieldsArray = [...fields];
+    dbFieldsArray = dbFieldsArray.filter(
+      (el) =>
+        [
+          "notebook",
+          "breadcrumb",
+          "tags",
+          "size",
+          "file",
+          "file_size",
+          "status",
+          "image",
+          "excerpt",
+          "link",
+        ].indexOf(el) === -1
+    );
+
+    dbFieldsArray = [
+      ...dbFieldsArray,
+      ...(await noteoverview.getAdditionalFields(fields)),
+    ];
+
+    let noteCount = 0;
+    let queryLimit = 50;
+    let noteLimit = overviewSettings["limit"] ? overviewSettings["limit"] : -1;
+
+    if (noteLimit != -1) {
+      logging.verbose("Note limit: " + noteLimit);
+      if (overviewSettings.limit < queryLimit) {
+        queryLimit = overviewSettings.limit;
+        logging.verbose("Query limit: " + queryLimit);
+      }
+    }
+
+    let queryNotes = null;
+    let contentBlock: string[] = [];
+    let pageQueryNotes = 1;
+    const entrys: string[] = [];
+    do {
+      try {
+        queryNotes = await joplin.data.get(["search"], {
+          query: query,
+          fields: "id, parent_id, " + dbFieldsArray.join(","),
+          order_by: options.orderBy,
+          order_dir: options.orderDir.toUpperCase(),
+          limit: queryLimit,
+          page: pageQueryNotes++,
+        });
+      } catch (error) {
+        logging.error(error.message);
+        let errorMsg = error.message;
+        errorMsg = errorMsg.replace(/(.*)(:\sSELECT.*)/g, "$1");
+
+        await noteoverview.showError(noteTitle, errorMsg, "");
+        let settingsOnly: string[] = [];
+        settingsOnly.unshift(
+          await noteoverview.createSettingsBlock(overviewSettings)
+        );
+        return settingsOnly;
+      }
+
+      for (let queryNotesKey in queryNotes.items) {
+        if (noteLimit != -1 && noteCount >= noteLimit) {
+          break;
+        }
+        if (queryNotes.items[queryNotesKey].id != noteId) {
+          noteCount++;
+
+          if (options.listview) {
+            entrys.push(
+              await noteoverview.getNoteInfoAsListView(
+                queryNotes.items[queryNotesKey],
+                options
+              )
+            );
+          } else {
+            entrys.push(
+              await noteoverview.getNoteInfoAsTable(
+                fields,
+                queryNotes.items[queryNotesKey],
+                options
+              )
+            );
+          }
+        }
+      }
+    } while (
+      queryNotes.has_more &&
+      (noteCount <= noteLimit || noteLimit == -1)
+    );
+
+    if (options.listview) {
+      if (options.listview.separator) {
+        for (let index = 0; index < entrys.length - 1; index++) {
+          entrys[index] += options.listview.separator;
+        }
+      }
+
+      if (options.listview.prefix) entrys.unshift(options.listview.prefix);
+      if (options.listview.suffix) entrys.push(options.listview.suffix);
+
+      if (options.listview.linebreak === false) {
+        contentBlock.push(entrys.join(""));
+      } else {
+        contentBlock = entrys;
+      }
+    } else {
+      contentBlock = [
+        ...(await noteoverview.getTableHeader(headerFields)),
+        ...entrys,
+      ];
+    }
+
+    await addNoteCount(contentBlock, noteCount, options);
+
+    await addHTMLDetailsTag(contentBlock, noteCount, options);
+
+    return contentBlock;
   }
 
   export async function addHTMLDetailsTag(

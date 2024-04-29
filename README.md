@@ -30,6 +30,7 @@ A note overview is created based on the defined search and the specified fields.
     - [excerpt](#excerpt)
     - [details](#details)
     - [count](#count)
+    - [split](#split)
     - [listview](#listview)
     - [link](#link)
     - [status](#status)
@@ -283,6 +284,22 @@ count:
   enable: [true | false]
   position: [above | below]
   text: Note count: {{count}}
+```
+
+### split
+
+Allow you to split single overview to multiple overview by certain [fields](#fields).
+You can choose to split overview based on `notebook`, `breadcrumb`, `tags`.
+
+In the `prefix`, the variable `{{title}}` can be used to display the [fields](#fields) value.
+
+`prefix` and `suffix` are optional
+
+```yml
+split:
+  by: tags
+  prefix: "## {{title}}"
+  suffix: ---
 ```
 
 ### listview

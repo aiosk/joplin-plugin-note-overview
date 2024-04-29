@@ -14,6 +14,7 @@ type OverviewOptions = {
   escapeForTable: boolean;
   link: OverviewOptionsLink;
   datetimeSettings: OverviewOptionsDatetime;
+  split: OverviewOptionsSplit;
 };
 
 type OverviewOptionsLink = {
@@ -48,6 +49,12 @@ type OverviewOptionsDatetime = {
 type OverviewOptionsDatetimeHumanize = {
   enabled: boolean;
   withSuffix: boolean;
+};
+
+type OverviewOptionsSplit = {
+  by: string;
+  prefix: string;
+  suffix: string;
 };
 
 export { OverviewOptions };
